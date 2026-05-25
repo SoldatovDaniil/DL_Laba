@@ -2,6 +2,20 @@
 
 A simple demo of **image classification** using pytorch. Here, we use a **custom dataset** containing **43956 images** belonging to **11 classes** for training(and validation). Also, we compare three different approaches for training viz. **training from scratch, finetuning the convnet and convnet as a feature extractor**, with the help of **pretrained** pytorch models. The models used include: **VGG11, Resnet18 and MobilenetV2**.
 
+### Quick Start with Docker
+
+```bash
+# Build the image
+docker build -t pytorch-image-classification .
+
+# Run the checker test
+docker run --rm pytorch-image-classification python RunCheckerTest.py
+
+# Run training (requires dataset mounted)
+docker run --rm -v $(pwd)/imds_small:/app/imds_small pytorch-image-classification \
+    python train.py --mode=finetune
+```
+
 ### Dependencies
 
 * Python3, Scikit-learn
