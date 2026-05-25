@@ -1,105 +1,125 @@
 import torch
-import torchvision
-from torchvision import models, transforms
-import torch.nn as nn
-import numpy as np
+from torchvision import transforms
 from PIL import Image
+from pathlib import Path
 import sys
 
 # Fixed seed for reproducibility
 SEED = 42
 torch.manual_seed(SEED)
-np.random.seed(SEED)
 
+MODEL_PATH = 'models/resnet18.pth'
+TEST_DIR = 'test'
 NUM_CLASSES = 11
-BATCH_SIZE = 4
-IMG_SIZE = 224
 
-CLASS_NAMES = ['apple', 'atm card', 'banana', 'bangle', 'battery',
-               'bottle', 'broom', 'bulb', 'calendar', 'camera', 'cat']
+CLASS_NAMES = ['apple', 'atm card', 'cat', 'banana', 'bangle',
+               'battery', 'bottle', 'broom', 'bulb', 'calender', 'camera']
 
-def build_model():
-    model = models.mobilenet_v2(weights=None)
-    num_ftrs = model.classifier[-1].in_features
-    model.classifier = nn.Sequential(
-        nn.Dropout(p=0.2, inplace=False),
-        nn.Linear(in_features=num_ftrs, out_features=NUM_CLASSES, bias=True)
-    )
+# Mapping filename -> expected class name
+EXPECTED = {
+    'apple.jpeg':    'apple',
+    'atm_card.jpeg': 'atm card',
+    'banana.jpeg':   'banana',
+    'bangle.jpeg':   'bangle',
+    'bottle.jpeg':   'bottle',
+    'bulb.jpeg':     'bulb',
+    'calender.jpeg': 'calender',
+    'camera.jpeg':   'camera',
+    'cat.jpeg':      'cat',
+}
+
+TRANSFORM = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
+
+
+def load_model():
+    model = torch.load(MODEL_PATH, map_location='cpu', weights_only=False)
+    model.eval()
     return model
 
-def get_transform():
-    return transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(IMG_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225])
-    ])
 
-def make_synthetic_batch():
-    transform = get_transform()
-    rng = np.random.RandomState(SEED)
-    images = []
-    for _ in range(BATCH_SIZE):
-        arr = rng.randint(0, 255, (256, 256, 3), dtype=np.uint8)
-        img = Image.fromarray(arr)
-        images.append(transform(img))
-    return torch.stack(images)
-
-def test_output_shape(model, batch):
-    model.eval()
+def predict(model, image_path):
+    img = Image.open(image_path).convert('RGB')
+    tensor = TRANSFORM(img).unsqueeze(0)
     with torch.no_grad():
-        output = model(batch)
-    assert output.shape == (BATCH_SIZE, NUM_CLASSES), \
-        f"Expected shape ({BATCH_SIZE}, {NUM_CLASSES}), got {output.shape}"
-    print(f"[PASS] Output shape: {output.shape}")
+        output = model(tensor)
+    class_idx = torch.argmax(output, dim=1).item()
+    return CLASS_NAMES[class_idx]
 
-def test_no_nan(model, batch):
-    model.eval()
-    with torch.no_grad():
-        output = model(batch)
-    assert not torch.isnan(output).any(), "Output contains NaN values"
-    print("[PASS] No NaN values in output")
 
-def test_prediction_valid(model, batch):
-    model.eval()
+def test_model_loads():
+    model = load_model()
+    assert model is not None
+    print(f"[PASS] Модель загружена из {MODEL_PATH}")
+    return model
+
+
+def test_output_shape(model):
+    dummy = torch.zeros(1, 3, 224, 224)
     with torch.no_grad():
-        output = model(batch)
-    probs = torch.softmax(output, dim=1)
-    pred_classes = torch.argmax(probs, dim=1)
-    assert all(0 <= c.item() < NUM_CLASSES for c in pred_classes), \
-        "Predicted class index out of range"
-    for i, c in enumerate(pred_classes):
-        print(f"  Sample {i+1}: predicted class {c.item()} ({CLASS_NAMES[c.item()]})")
-    print("[PASS] All predictions are valid class indices")
+        out = model(dummy)
+    assert out.shape == (1, NUM_CLASSES), \
+        f"Ожидается (1, {NUM_CLASSES}), получено {out.shape}"
+    print(f"[PASS] Форма выхода модели: {out.shape}")
+
+
+def test_classification(model):
+    images = list(Path(TEST_DIR).glob('*.*'))
+    assert len(images) > 0, f"Нет изображений в папке {TEST_DIR}/"
+
+    correct = 0
+    total = len([f for f in images if f.name in EXPECTED])
+
+    print(f"\n  {'Файл':<20} {'Ожидается':<12} {'Предсказано':<12} {'Результат'}")
+    print(f"  {'-'*60}")
+
+    for img_path in sorted(images):
+        if img_path.name not in EXPECTED:
+            continue
+        expected = EXPECTED[img_path.name]
+        predicted = predict(model, img_path)
+        ok = predicted == expected
+        if ok:
+            correct += 1
+        status = 'OK' if ok else 'FAIL'
+        print(f"  {img_path.name:<20} {expected:<12} {predicted:<12} {status}")
+
+    accuracy = correct / total * 100
+    print(f"\n  Точность: {correct}/{total} ({accuracy:.1f}%)")
+    assert accuracy >= 70.0, \
+        f"Точность {accuracy:.1f}% ниже порога 70%"
+    print(f"[PASS] Классификация реальных изображений: {accuracy:.1f}%")
+
 
 def test_reproducibility(model):
     torch.manual_seed(SEED)
-    np.random.seed(SEED)
-    batch1 = make_synthetic_batch()
+    out1 = predict(model, f"{TEST_DIR}/cat.jpeg")
     torch.manual_seed(SEED)
-    np.random.seed(SEED)
-    batch2 = make_synthetic_batch()
-    assert torch.allclose(batch1, batch2), "Synthetic batches are not reproducible"
-    print("[PASS] Input generation is reproducible with fixed seed")
+    out2 = predict(model, f"{TEST_DIR}/cat.jpeg")
+    assert out1 == out2, "Результаты не воспроизводимы"
+    print(f"[PASS] Воспроизводимость: два прогона дают одинаковый результат ({out1})")
+
 
 def main():
-    print("=" * 50)
+    print("=" * 60)
     print("PyTorch Image Classification - RunCheckerTest")
-    print(f"Seed: {SEED} | Classes: {NUM_CLASSES} | Batch: {BATCH_SIZE}")
-    print("=" * 50)
-
-    model = build_model()
-    batch = make_synthetic_batch()
+    print(f"Модель: {MODEL_PATH} | Классов: {NUM_CLASSES} | Seed: {SEED}")
+    print("=" * 60)
 
     tests = [
-        ("Output shape",       lambda: test_output_shape(model, batch)),
-        ("No NaN in output",   lambda: test_no_nan(model, batch)),
-        ("Valid predictions",  lambda: test_prediction_valid(model, batch)),
-        ("Reproducibility",    lambda: test_reproducibility(model)),
+        ("Загрузка модели",          lambda: test_model_loads()),
+        ("Форма выхода",             lambda: test_output_shape(load_model())),
+        ("Классификация изображений", lambda: test_classification(load_model())),
+        ("Воспроизводимость",        lambda: test_reproducibility(load_model())),
     ]
 
     failed = 0
+    model = None
     for name, test_fn in tests:
         print(f"\n--- {name} ---")
         try:
@@ -111,12 +131,13 @@ def main():
             print(f"[ERROR] {e}")
             failed += 1
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     if failed == 0:
-        print(f"All {len(tests)} tests passed.")
+        print(f"Все {len(tests)} теста пройдены успешно.")
     else:
-        print(f"{failed}/{len(tests)} tests FAILED.")
+        print(f"{failed}/{len(tests)} тестов НЕ пройдено.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
